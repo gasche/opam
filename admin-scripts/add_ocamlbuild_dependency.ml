@@ -10,6 +10,7 @@
    heuristically seem to depend on ocamlbuild, that is:
    - they have a _tags or myocamlbuild.ml
    - they have an _oasis file with "BuildTools: ocamlbuild" inside
+   - or they call "ocamlbuild" in the opam build command
 *)
 
 open Opam_admin_top
@@ -20,6 +21,9 @@ type action = [ `Download | `Detect | `Reformat | `Add_dep ]
    `Download: download all package archives to test ocamlbuild usage;
       if disabled, only packages already marked in the archive cache
       will be traversed.
+
+   `Detect: inspect the archives to tell which packages seem to depend
+     on ocamlbuild, from the archive content alone (not opam metadata).
 
    `Reformat: before changing anything, it is useful to reformat the
      ./opam files of the packages we know we will change, to minimize
@@ -241,6 +245,18 @@ let ocamlbuild_map =
    readable diff for the actual dependency-introducing second patch.
 *)
 
+let ocamlbuild_in_opam_metadata opam =
+  let ocamlbuild_in_command (command, _filters) =
+    match command with
+      | [] -> false
+      | (head, _filters) :: _args ->
+        begin match head with
+          | OpamTypes.CString "ocamlbuild"
+          | OpamTypes.CIdent "ocamlbuild" -> true
+          | _ -> false
+        end
+  in List.exists ocamlbuild_in_command (OpamFile.OPAM.build opam)
+
 let add_ocamlbuild_dep opam0 =
   let add_ocamlbuild deps =
     let ocamlbuild = OpamPackage.Name.of_string "ocamlbuild" in
@@ -279,7 +295,10 @@ let () =
     print_endline "UPDATE REPOSITORY";
     iter_packages
       ~f:(fun package prefix opam ->
-          match OpamPackage.Map.find package ocamlbuild_map with
+          match
+            (OpamPackage.Map.find package ocamlbuild_map
+            || ocamlbuild_in_opam_metadata opam)
+          with
           | exception Not_found -> ()
           | false -> ()
           | true ->
