@@ -14,43 +14,32 @@
 
 open Opam_admin_top
 
-(* Part 1: downloading the archives of all OPAM packages *)
+type action = [ `Download | `Detect | `Reformat | `Add_dep ]
+(* The script may perform three different actions:
 
-let in_blacklist package =
-  (* I was unable to download these packages (acgtk),
-     or their checksum did not match (acii85, planets),
-     or their download takes a while and I know ocamlbuild
-     won't be necessary (ocaml-src). *)
-  let blacklist = ["acgtk"; "ascii85"; "ocaml-src"; "planets"] in
-  List.mem (OpamPackage.name_to_string package) blacklist
+   `Download: download all package archives to test ocamlbuild usage;
+      if disabled, only packages already marked in the archive cache
+      will be traversed.
 
-(* cache the archive data in the current directory to skip the
-   download-all-archives phase when it has been completed. *)
-let archive_cache_file = "archive_cache.data"
-let archive_cache_version = 2
+   `Reformat: before changing anything, it is useful to reformat the
+     ./opam files of the packages we know we will change, to minimize
+     the diff size of the actual change.
 
-let archive_cache =
-  if not (Sys.file_exists archive_cache_file) then None
-  else begin
-    let input = open_in_bin archive_cache_file in
-    let table_version = (input_value input : int) in
-    let version_match = (archive_cache_version = table_version) in
-    if not version_match then begin
-      close_in input;
-      Printf.eprintf
-        "Archive cache %S is at version %d,\
-         while version %d was expected\n%!"
-        archive_cache_file table_version archive_cache_version;
-      None
-    end else begin
-      let table =
-        (input_value input : OpamTypes.generic_file OpamPackage.Map.t) in
-      close_in input;
-      Some table
-    end
-  end
+   `Add_dep: actually edit the ./opam files to add 'ocamlbuild' as
+     a build dependency, whenever it is not already present as
+     a dependency.
+*)
 
-(* First, we download the archives of all packages in parallel.
+(* edit this list to disable certain actions *)
+let actions : action list = [
+  `Download;
+  `Detect;
+  `Reformat;
+  `Add_dep
+]
+
+
+(* Part 1: downloading the archives of all OPAM packages in parallel
 
    In theory this is wasteful of disk space: we could unpack the
    archive immediately after download, check ocamlbuild usage, store
@@ -70,30 +59,71 @@ let archive_cache =
    a cache in [archive_cache_file], which is a map of available
    archives. Packages not in the cache could not be downloaded.
 *)
+
+let in_blacklist package =
+  (* I was unable to download these packages (acgtk),
+     or their checksum did not match (acii85, planets),
+     or their download takes a while and I know ocamlbuild
+     won't be necessary (ocaml-src). *)
+  let blacklist = ["acgtk"; "ascii85"; "ocaml-src"; "planets"] in
+  List.mem (OpamPackage.name_to_string package) blacklist
+
+(* cache the archive data in the current directory to skip the
+   download-all-archives phase when it has been completed. *)
+type 'a cache = { file : string; version : int }
+
+let archive_cache : OpamTypes.generic_file OpamPackage.Map.t cache = {
+  file = "archive_cache.data";
+  version = 1;
+}
+
+let read_cache ({ file; version } : 'a cache) : 'a option =
+  if not (Sys.file_exists file) then None
+  else begin
+    let input = open_in_bin file in
+    let input_version = (input_value input : int) in
+    let version_match = (input_version = version) in
+    if not version_match then begin
+      close_in input;
+      Printf.eprintf
+        "Cache %S is at version %d, but version %d was expected\n%!"
+        file input_version version;
+      None
+    end else begin
+      let cache = (input_value input : 'a) in
+      close_in input;
+      Some cache
+    end
+  end
+
+let write_cache ({ file; version } : 'a cache) (cache : 'a) : unit =
+  let output = open_out_bin file in
+  output_value output (version : int);
+  output_value output (cache : 'a);
+  close_out output
+
+let state =
+  (* I need an OpamState.t value to pass to
+     OpamAction.download_package; I scraped this code from the
+     intimidating couverture.ml codebase, and I don't know what it is
+     doing (where is the cache data stored?), but testing seems to say
+     it works. *)
+  let root = OpamStateConfig.opamroot () in
+  OpamFormatConfig.init ();
+  if not (OpamStateConfig.load_defaults root) then
+    failwith "Opam root not found";
+  OpamStd.Config.init ();
+  OpamSolverConfig.init ();
+  OpamStateConfig.init ();
+  OpamState.load_state ~save_cache:true "add_ocamlbuild_dep"
+    OpamStateConfig.(!r.current_switch)
+
 let archives =
-  match archive_cache with
+  match read_cache archive_cache with
   | Some archives -> archives
   | None ->
     let archives = ref OpamPackage.Map.empty in
-
-    let state =
-      (* I need an OpamState.t value to pass to
-         OpamAction.download_package; I scraped this code from the
-         intimidating couverture.ml codebase, and I don't know what it is
-         doing (where is the cache data stored?), but testing seems to say
-         it works. *)
-      let root = OpamStateConfig.opamroot () in
-      OpamFormatConfig.init ();
-      if not (OpamStateConfig.load_defaults root) then
-        failwith "Opam root not found";
-      OpamStd.Config.init ();
-      OpamSolverConfig.init ();
-      OpamStateConfig.init ();
-      OpamState.load_state ~save_cache:true "add_ocamlbuild_dep"
-        OpamStateConfig.(!r.current_switch)
-    in
-
-    let () =
+    if List.mem `Download actions then begin
       print_endline "DOWNLOAD";
       let open OpamProcess.Job.Op in
       let repo_index = OpamState.package_state state in
@@ -118,17 +148,12 @@ let archives =
                 Done ()
             end)
         (OpamPackage.Map.keys repo_index)
-    in
-
-    (* after the download are done, write the archive cache *)
-    let output = open_out_bin archive_cache_file in
-    output_value output archive_cache_version;
-    output_value output !archives;
-    close_out output;
-
+    end;
+    write_cache archive_cache !archives;
     !archives
 
-(* Part 2: checking for ocamlbuild usage and metadata update *)
+
+(* Part 2: checking for ocamlbuild usage *)
 
 let oasis_ocamlbuild_re =
   (* regexp to find "BuildTools: ocamlbuild" *)
@@ -154,7 +179,7 @@ let ocamlbuild_in_oasis dir =
   in
   List.exists uses_ocamlbuild oasis_files
 
-let detect_ocamlbuild_use package dir opam =
+let detect_ocamlbuild_use package dir =
   (* We test for _tags or myocamlbuild.ml or _oasis files even in
      depth ([rec_files] and not just [files]), so that it works below
      a src/ sub-directory for example. This means that we may detect
@@ -169,36 +194,37 @@ let detect_ocamlbuild_use package dir opam =
   || List.mem "myocamlbuild.ml" files
   || List.mem "_oasis" files && ocamlbuild_in_oasis dir
 
-let ocamlbuild_dep : OpamTypes.ext_formula =
-  OpamFormula.Atom
-    (OpamPackage.Name.of_string "ocamlbuild",
-     (
-       (* We only add a *build-time* dependency when ocamlbuild usage
-          is detected.  Some people may depend on ocamlbuild at other
-          time (to link the ocamlbuild library modules in their
-          program, for example), they will have to extend the
-          dependency scope manually. *)
-       [OpamTypes.Depflag_Build],
+let ocamlbuild_cache : bool OpamPackage.Map.t cache = {
+  file = "ocamlbuild_cache.data";
+  version = 1;
+}
 
-      (* do not assume any upper bound on ocamlbuild version; note that
-         the versions bundled with OCaml <= 4.02 are all considered
-         "version 0".  *)
-      OpamFormula.Empty))
+let ocamlbuild_map =
+  match read_cache ocamlbuild_cache with
+  | Some map -> map
+  | None ->
+    if not (List.mem `Detect actions) then OpamPackage.Map.empty
+    else begin
+      print_endline "DETECT OCAMLBUILD";
+      let map = OpamPackage.Map.mapi (fun package archive ->
+          OpamFilename.with_tmp_dir (fun dir ->
+              let archive_dir = OpamFilename.Op.(dir / "archive") in
+              OpamFilename.extract_generic_file archive archive_dir;
+              let ocamlbuild_usage =
+                detect_ocamlbuild_use package archive_dir in
+              let package_str =
+                Printf.sprintf "%s.%s"
+                  (OpamPackage.name_to_string package)
+                  (OpamPackage.version_to_string package) in
+              Printf.printf "Package %S ocamlbuild usage: %B\n%!"
+                package_str ocamlbuild_usage;
+              ocamlbuild_usage)
+        ) archives in
+      write_cache ocamlbuild_cache map;
+      map
+    end
 
-let add_ocamlbuild_dep opam0 =
-  let open OpamFile.OPAM in
-  let opam = with_depends opam0
-      (OpamFormula.And(ocamlbuild_dep, depends opam0)) in
-  if opam = opam0 then opam0
-  else with_opam_version opam @@ OpamVersion.of_string "1.2"
-
-
-(* Second, we update the opam-repository metadata.
-
-   We iterate over all packages in the opam-repository rooted at the
-   script invocation's working directory, extract the corresponding
-   archive, checking for ocamlbuild usage, and updating the OPAM
-   metadata if necessary.
+(* Part 3: opam-repository metadata update
 
    The metadata-update functions provided by the OPAM library have
    a tendency to change the ordering of `opam` fields, or the
@@ -206,25 +232,67 @@ let add_ocamlbuild_dep opam0 =
    brackets used in the file. This means that diffs between the
    before- and after- opam files may be sensibly larger than
    necessary.
+
+   To alleviate this issue, we provide two separate actions on
+   ocamlbuild-detected files, a `Reformat action that only rewrites
+   the file as pretty-printed by OPAM, and an `Add_dep action that
+   actually adds the dependency. This allows to do the change in two
+   step, with a large but semantics-preserving first patch, and a more
+   readable diff for the actual dependency-introducing second patch.
 *)
+
+let add_ocamlbuild_dep opam0 =
+  let add_ocamlbuild deps =
+    let ocamlbuild = OpamPackage.Name.of_string "ocamlbuild" in
+    let open OpamFormula in
+    let ocamlbuild_dep =
+      Atom
+        (ocamlbuild,
+         (
+           (* We only add a *build-time* dependency when ocamlbuild usage
+              is detected.  Some people may depend on ocamlbuild at other
+              time (to link the ocamlbuild library modules in their
+              program, for example), they will have to extend the
+              dependency scope manually. *)
+           [OpamTypes.Depflag_Build],
+
+           (* do not assume any upper bound on ocamlbuild version; note that
+              the versions bundled with OCaml <= 4.02 are all considered
+              "version 0".  *)
+           Empty)) in
+    let is_ocamlbuild (name, _versions) =
+      OpamPackage.Name.compare name ocamlbuild = 0 in
+    let has_ocamlbuild_dep deps =
+      List.exists is_ocamlbuild
+        (atoms (formula_of_extended (fun _ -> true) deps)) in
+    (* do not add an ocamlbuild dependency if one already exists *)
+    if has_ocamlbuild_dep deps then deps
+    else And(deps, ocamlbuild_dep)
+  in
+  let open OpamFile.OPAM in
+  let opam = with_depends opam0 (add_ocamlbuild (depends opam0)) in
+  if opam = opam0 then opam0
+  else with_opam_version opam (OpamVersion.of_string "1.2")
+
 let () =
-  print_endline "ARCHIVE INSPECTION";
-  iter_packages
-    ~opam:(fun package opam ->
-        let package_str =
-          Printf.sprintf "%s.%s"
-            (OpamPackage.name_to_string package)
-            (OpamPackage.version_to_string package) in
-        match OpamPackage.Map.find package archives with
-        | exception Not_found -> opam
-        | archive ->
-          let ocamlbuild_use =
-            OpamFilename.with_tmp_dir (fun dir ->
-                let archive_dir = OpamFilename.Op.(dir / "archive") in
-                OpamFilename.extract_generic_file archive archive_dir;
-                detect_ocamlbuild_use package archive_dir opam) in
-          Printf.printf "Package %S ocamlbuild usage: %B\n%!"
-            package_str ocamlbuild_use;
-          if not ocamlbuild_use then opam
-          else add_ocamlbuild_dep opam)
-    ()
+  if List.mem `Reformat actions || List.mem `Add_dep actions then begin
+    print_endline "UPDATE REPOSITORY";
+    iter_packages
+      ~f:(fun package prefix opam ->
+          match OpamPackage.Map.find package ocamlbuild_map with
+          | exception Not_found -> ()
+          | false -> ()
+          | true ->
+            let updated_opam =
+              OpamFile.OPAM.with_opam_version opam (OpamVersion.of_string "1.2")
+            in
+            let final_opam =
+              if List.mem `Add_dep actions then add_ocamlbuild_dep updated_opam
+              else if List.mem `Reformat actions then updated_opam
+              else opam in
+            let repo = Opam_admin_top.repo in
+            let opam_file = OpamRepositoryPath.opam repo prefix package in
+            OpamFile.OPAM.write opam_file final_opam
+        )
+      ()
+  end
