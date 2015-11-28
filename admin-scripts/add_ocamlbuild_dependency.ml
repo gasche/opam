@@ -107,20 +107,29 @@ let write_cache ({ file; version } : 'a cache) (cache : 'a) : unit =
   close_out output
 
 let state =
-  (* I need an OpamState.t value to pass to
-     OpamAction.download_package; I scraped this code from the
-     intimidating couverture.ml codebase, and I don't know what it is
-     doing (where is the cache data stored?), but testing seems to say
-     it works. *)
-  let root = OpamStateConfig.opamroot () in
-  OpamFormatConfig.init ();
-  if not (OpamStateConfig.load_defaults root) then
-    failwith "Opam root not found";
-  OpamStd.Config.init ();
-  OpamSolverConfig.init ();
-  OpamStateConfig.init ();
-  OpamState.load_state ~save_cache:true "add_ocamlbuild_dep"
-    OpamStateConfig.(!r.current_switch)
+  match Sys.getenv "OPAMROOT" with
+  | exception Not_found ->
+    prerr_endline
+      "To run this script you must set the OPAMROOT variable \
+       to explicitly indicate the OPAM root on which to operate.\n\
+       Our recommendation is the following:\n\
+         - clone a fresh copy of an OPAM repository, for example:\n\
+         \t git@github.com:ocaml/opam-repository.git\n\
+         - use this fresh copy as current directory, \
+           and create a `local-root` subdirectory\n\
+         - initialize `local-root` as an OPAM root \
+           on top of this cloned repository, by running:\n\
+         \t OPAMROOT=$(pwd)/local-root opam init $(pwd) \n\
+         - run the script with OPAMROOT=$(pwd)/local-root set\n\
+       ";
+      failwith "OPAMROOT not set";
+  | root ->
+    OpamFormatConfig.init ();
+    assert (OpamStateConfig.load_defaults (OpamFilename.Dir.of_string root));
+    OpamStd.Config.init ();
+    OpamStateConfig.init ();
+    OpamState.load_state ~save_cache:true "add_ocamlbuild_dep"
+      OpamSwitch.system
 
 let archives =
   match read_cache archive_cache with
