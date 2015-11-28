@@ -132,10 +132,10 @@ let state =
       OpamSwitch.system
 
 let archives =
-  match read_cache archive_cache with
-  | Some archives -> archives
-  | None ->
-    let archives = ref OpamPackage.Map.empty in
+  let archives = ref
+      (match read_cache archive_cache with
+       | Some archives -> archives
+       | None -> OpamPackage.Map.empty) in
     if List.mem `Download actions then begin
       print_endline "DOWNLOAD";
       let open OpamProcess.Job.Op in
@@ -143,12 +143,13 @@ let archives =
       OpamParallel.iter
         ~jobs:20 (* download are I/O driven, lots of job is fine *)
         ~command:(fun package ->
-            let package_str =
-              Printf.sprintf "%s.%s"
-                (OpamPackage.name_to_string package)
-                (OpamPackage.version_to_string package) in
-            if in_blacklist package then Done ()
+            if OpamPackage.Map.mem package !archives
+            || in_blacklist package then Done ()
             else begin
+              let package_str =
+                Printf.sprintf "%s.%s"
+                  (OpamPackage.name_to_string package)
+                  (OpamPackage.version_to_string package) in
               OpamAction.download_package state package @@+ function
               | `Error err ->
                 Printf.printf "failed to download %S: %s\n%!" package_str err;
@@ -160,9 +161,9 @@ let archives =
                 archives := OpamPackage.Map.add package archive !archives;
                 Done ()
             end)
-        (OpamPackage.Map.keys repo_index)
+        (OpamPackage.Map.keys repo_index);
+      write_cache archive_cache !archives;
     end;
-    write_cache archive_cache !archives;
     !archives
 
 
@@ -213,13 +214,17 @@ let ocamlbuild_cache : bool OpamPackage.Map.t cache = {
 }
 
 let ocamlbuild_map =
-  match read_cache ocamlbuild_cache with
-  | Some map -> map
-  | None ->
-    if not (List.mem `Detect actions) then OpamPackage.Map.empty
-    else begin
-      print_endline "DETECT OCAMLBUILD";
-      let map = OpamPackage.Map.mapi (fun package archive ->
+  let cached_map =
+    match read_cache ocamlbuild_cache with
+    | Some map -> map
+    | None -> OpamPackage.Map.empty in
+  if not (List.mem `Detect actions) then OpamPackage.Map.empty
+  else begin
+    print_endline "DETECT OCAMLBUILD";
+    let map = OpamPackage.Map.mapi (fun package archive ->
+        match OpamPackage.Map.find package cached_map with
+        | result -> result
+        | exception Not_found ->
           OpamFilename.with_tmp_dir (fun dir ->
               let archive_dir = OpamFilename.Op.(dir / "archive") in
               OpamFilename.extract_generic_file archive archive_dir;
@@ -232,10 +237,10 @@ let ocamlbuild_map =
               Printf.printf "Package %S ocamlbuild usage: %B\n%!"
                 package_str ocamlbuild_usage;
               ocamlbuild_usage)
-        ) archives in
-      write_cache ocamlbuild_cache map;
-      map
-    end
+      ) archives in
+    write_cache ocamlbuild_cache map;
+    map
+  end
 
 (* Part 3: opam-repository metadata update
 
@@ -320,7 +325,27 @@ let () =
               else opam in
             let repo = Opam_admin_top.repo in
             let opam_file = OpamRepositoryPath.opam repo prefix package in
-            OpamFile.OPAM.write opam_file final_opam
-        )
+            if List.mem `Reformat actions then begin
+              (* this very ugly hack avoids a shortcoming of the
+                 formatting-preserving printer, which currently only
+                 works for fields that have the exact same name in the
+                 parsed and printed version. The field "author" is
+                 a legacy name that is supported in parsing, but
+                 reprinted as "authors", and its formatting would thus
+                 not be preserved. *)
+              let rename input output =
+                let cmd =
+                  Printf.sprintf
+                    "sed \"s/%s/%s/\" %s --in-place"
+                    input output (OpamFilename.to_string opam_file) in
+                ignore (Sys.command cmd) in
+              (* if "author:" is followed by more than two spaces,
+                 this is a column-aligned version so we remove one space *)
+              rename "^author:  " "authors: ";
+              rename "^author:" "authors:";
+            end;
+            let printed_opam =
+              OpamFile.OPAM.to_string_with_preserved_format opam_file final_opam in
+            OpamFilename.write opam_file printed_opam)
       ()
   end
