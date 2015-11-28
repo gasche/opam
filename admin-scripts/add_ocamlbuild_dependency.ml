@@ -1,7 +1,7 @@
 (* This program is compiled from opam/admin-scripts (where opam is
    a git clone of upstream opam with "make" done), by the command
 
-    ocamlfind ocamlc -package oasis,opam-lib,opam-lib.state -linkpkg -I ../src/tools opam_admin_top.cmo add_ocamlbuild_dependency.ml -o add_ocamlbuild_dependency
+    ocamlfind ocamlc -package re.glob,oasis,opam-lib,opam-lib.state -linkpkg -I ../src/tools opam_admin_top.cmo add_ocamlbuild_dependency.ml -o add_ocamlbuild_dependency
 
    It then needs to be run from a clone of opam-repository.
 *)
