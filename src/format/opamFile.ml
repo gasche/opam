@@ -1531,6 +1531,9 @@ module OPAMSyntax = struct
       ppacc set get pp,
       ppacc set get ~cleanup pp
     in
+    (* disable cleanup functions for 1.2-compatible reprinting *)
+    let _ = with_cleanup in
+    let with_cleanup _cleanup = no_cleanup in
     [
       "opam-version", no_cleanup Pp.ppacc with_opam_version opam_version
         (Pp.V.string -| Pp.of_module "opam-version" (module OpamVersion: Pp.STR with type t = OpamVersion.t));
