@@ -204,7 +204,7 @@ let detect_ocamlbuild_use package dir =
     OpamFilename.rec_files dir
     |> List.map OpamFilename.basename
     |> List.map OpamFilename.Base.to_string
-  in List.mem "_tag" files
+  in List.mem "_tags" files
   || List.mem "myocamlbuild.ml" files
   || List.mem "_oasis" files && ocamlbuild_in_oasis dir
 
