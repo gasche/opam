@@ -792,6 +792,11 @@ let conflict_chains packages = function
     make_chains packages (cudfnv2opam ~cudf_universe ~version_map) (r ())
   | _ -> []
 
+let conflict_cycles = function
+  | _cudf_universe, _version_map, Conflict_cycle cycles ->
+    cycles
+  | _ -> []
+
 let string_of_conflict packages unav_reasons conflict =
   let final, chains, cycles =
     strings_of_conflict packages unav_reasons conflict
