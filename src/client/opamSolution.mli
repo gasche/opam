@@ -34,6 +34,9 @@ val apply:
   requested:OpamPackage.Name.Set.t ->
   ?add_roots:OpamPackage.Name.Set.t ->
   ?assume_built:bool ->
+  ?report_action_result:
+    (package action -> (OpamPackage.Set.t * OpamPackage.Set.t,
+                        OpamSolver.Action.Set.t) action_result -> unit) ->
   OpamSolver.solution ->
   rw switch_state * solution_result
 
