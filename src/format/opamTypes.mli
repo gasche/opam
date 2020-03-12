@@ -252,6 +252,12 @@ type 'a cause =
   | Unknown
 
 (** Solver result *)
+type ('a, 'b) action_result = [
+  | `Successful of 'a
+  | `Exception of exn
+  | `Aborted of 'b
+]
+
 type actions_result = {
   actions_successes : package action list;
   actions_errors : (package action * exn) list;
